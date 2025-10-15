@@ -127,7 +127,7 @@ async def log_requests_middleware(request: Request, call_next):
         raise
 
 # Define allowed origins based on environment
-allowed_origins = ["https://www.suna.so", "https://suna.so"]
+allowed_origins = ["https://www.suna.so", "https://suna.so", "http://localhost:3000", "http://localhost:3001"]
 allow_origin_regex = None
 
 # Add staging-specific origins
@@ -142,12 +142,19 @@ if config.ENV_MODE == EnvMode.STAGING:
 
 app.add_middleware(
     CORSMiddleware,
+    # allow_origins=allowed_origins,
+    # allow_origin_regex=allow_origin_regex,
+    # allow_credentials=True,
+    # allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    # allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers", "X-Refresh-Token", "X-API-Key"],
     allow_origins=allowed_origins,
     allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers", "X-Refresh-Token", "X-API-Key"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+
 
 # Create a main API router
 api_router = APIRouter()
