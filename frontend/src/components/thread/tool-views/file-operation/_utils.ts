@@ -448,7 +448,36 @@ export const hasLanguageHighlighting = (language: string): boolean => {
 };
 
 export const splitContentIntoLines = (fileContent: string | null): string[] => {
-  return fileContent
-    ? fileContent.replace(/\\n/g, '\n').split('\n')
-    : [];
+  console.log('🔍 splitContentIntoLines called with:', typeof fileContent, fileContent);
+  
+  if (!fileContent || typeof fileContent !== 'string') {
+    console.warn('❌ splitContentIntoLines: Invalid content type:', typeof fileContent, fileContent);
+    return [];
+  }
+  return fileContent.replace(/\\n/g, '\n').split('\n');
 };
+
+export function calculateEmptyLinesNeeded(
+  contentLinesCount: number,
+  containerHeight: number,
+  lineHeight: number = 24, // Default line height in pixels
+  minEmptyLines: number = 20 // Minimum empty lines to add
+): number {
+  // Calculate how many lines can fit in the viewport
+  const visibleLines = Math.floor(containerHeight / lineHeight);
+  
+  // If content already fills the viewport, add minimum empty lines
+  if (contentLinesCount >= visibleLines) {
+    return minEmptyLines;
+  }
+  
+  // Otherwise, calculate how many empty lines needed to fill viewport
+  // Add a buffer to ensure smooth scrolling
+  const emptyLinesNeeded = visibleLines - contentLinesCount + minEmptyLines;
+  
+  return Math.max(emptyLinesNeeded, minEmptyLines);
+}
+
+export function generateEmptyLines(count: number): string[] {
+  return Array.from({ length: count }, () => '');
+}

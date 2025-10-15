@@ -167,7 +167,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
   const stopAgentMutation = useStopAgentMutation();
   const { data: threadAgentData } = useThreadAgent(threadId);
   const agent = threadAgentData?.agent;
-  const workflowId = threadQuery.data?.metadata?.workflow_id;
 
   useEffect(() => {
     queryClient.invalidateQueries({ queryKey: threadKeys.agentRuns(threadId) });
@@ -398,7 +397,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
   const handleSubmitMessage = useCallback(
     async (
       message: string,
-      options?: { model_name?: string; enable_thinking?: boolean },
+      options?: { model_name?: string },
     ) => {
       if (!message.trim()) return;
       setIsSending(true);

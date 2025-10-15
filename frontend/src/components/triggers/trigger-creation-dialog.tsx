@@ -13,32 +13,50 @@ import { ArrowRight, Clock, PlugZap } from 'lucide-react';
 import { EventBasedTriggerDialog } from '@/components/agents/triggers/event-based-trigger-dialog';
 import { SimplifiedScheduleConfig } from '@/components/agents/triggers/providers/simplified-schedule-config';
 import { ScheduleTriggerConfig } from '@/components/agents/triggers/types';
-import { useCreateTrigger } from '@/hooks/react-query/triggers';
+import { useCreateTrigger, useUpdateTrigger } from '@/hooks/react-query/triggers';
 import { toast } from 'sonner';
-import { AgentSelectionDropdown } from '@/components/agents/agent-selection-dropdown';
+import { AgentSelector } from '@/components/agents/agent-selector';
 
 interface TriggerCreationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   type: 'schedule' | 'event';
   onTriggerCreated?: (triggerId: string) => void;
+  isEditMode?: boolean;
+  existingTrigger?: any; // TriggerConfiguration for edit mode
+  onTriggerUpdated?: (triggerId: string) => void;
 }
 
 export function TriggerCreationDialog({
   open,
   onOpenChange,
   type,
-  onTriggerCreated
+  onTriggerCreated,
+  isEditMode = false,
+  existingTrigger,
+  onTriggerUpdated
 }: TriggerCreationDialogProps) {
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [step, setStep] = useState<'agent' | 'config'>('agent');
   const [name, setName] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [config, setConfig] = useState<ScheduleTriggerConfig>({
-    cron_expression: '',
-    execution_type: 'agent'
+    cron_expression: ''
   });
   const createTriggerMutation = useCreateTrigger();
+  const updateTriggerMutation = useUpdateTrigger();
+
+  // Initialize form for edit mode
+  React.useEffect(() => {
+    if (isEditMode && existingTrigger && open) {
+      setSelectedAgent(existingTrigger.agent_id || '');
+      setName(existingTrigger.name || '');
+      setDescription(existingTrigger.description || '');
+      setConfig(existingTrigger.config || { cron_expression: '' });
+      // Skip agent selection step in edit mode
+      setStep('config');
+    }
+  }, [isEditMode, existingTrigger, open]);
 
   const scheduleProvider = {
     provider_id: 'schedule',
@@ -55,23 +73,40 @@ export function TriggerCreationDialog({
     }
 
     try {
-      const newTrigger = await createTriggerMutation.mutateAsync({
-        agentId: selectedAgent,
-        provider_id: 'schedule',
-        name: data.name || 'Scheduled Trigger',
-        description: data.description || 'Automatically scheduled trigger',
-        config: data.config,
-      });
-      toast.success('Schedule trigger created successfully');
+      if (isEditMode && existingTrigger) {
+        // Update existing trigger
+        await updateTriggerMutation.mutateAsync({
+          triggerId: existingTrigger.trigger_id,
+          name: data.name || 'Scheduled Trigger',
+          description: data.description || 'Automatically scheduled trigger',
+          config: data.config,
+          is_active: data.is_active,
+        });
+        toast.success('Schedule trigger updated successfully');
 
-      if (onTriggerCreated && newTrigger?.trigger_id) {
-        onTriggerCreated(newTrigger.trigger_id);
+        if (onTriggerUpdated && existingTrigger.trigger_id) {
+          onTriggerUpdated(existingTrigger.trigger_id);
+        }
+      } else {
+        // Create new trigger
+        const newTrigger = await createTriggerMutation.mutateAsync({
+          agentId: selectedAgent,
+          provider_id: 'schedule',
+          name: data.name || 'Scheduled Trigger',
+          description: data.description || 'Automatically scheduled trigger',
+          config: data.config,
+        });
+        toast.success('Schedule trigger created successfully');
+
+        if (onTriggerCreated && newTrigger?.trigger_id) {
+          onTriggerCreated(newTrigger.trigger_id);
+        }
       }
 
       handleClose();
     } catch (error: any) {
-      toast.error(error.message || 'Failed to create schedule trigger');
-      console.error('Error creating schedule trigger:', error);
+      toast.error(error.message || `Failed to ${isEditMode ? 'update' : 'create'} schedule trigger`);
+      console.error(`Error ${isEditMode ? 'updating' : 'creating'} schedule trigger:`, error);
     }
   };
 
@@ -97,22 +132,22 @@ export function TriggerCreationDialog({
               {type === 'schedule' ? (
                 <>
                   <Clock className="h-5 w-5" />
-                  Create Scheduled Task
+                  {isEditMode ? 'Edit Scheduled Task' : 'Create Scheduled Task'}
                 </>
               ) : (
                 <>
                   <PlugZap className="h-5 w-5" />
-                  Create App-based Task
+                  {isEditMode ? 'Edit App-based Task' : 'Create App-based Task'}
                 </>
               )}
             </DialogTitle>
             <DialogDescription>
-              First, select which agent should handle this task
+              {isEditMode ? 'Update the agent for this task' : 'First, select which agent should handle this task'}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
-            <AgentSelectionDropdown
+            <AgentSelector
               selectedAgentId={selectedAgent}
               onAgentSelect={setSelectedAgent}
               placeholder="Choose an agent"
@@ -153,6 +188,7 @@ export function TriggerCreationDialog({
         open={open}
         onOpenChange={onOpenChange}
         onSave={handleScheduleSave}
+        isEditMode={isEditMode}
       />
     );
   }
@@ -163,6 +199,9 @@ export function TriggerCreationDialog({
       onOpenChange={handleClose}
       agentId={selectedAgent}
       onTriggerCreated={onTriggerCreated}
+      isEditMode={isEditMode}
+      existingTrigger={existingTrigger}
+      onTriggerUpdated={onTriggerUpdated}
     />
   );
 } 

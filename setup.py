@@ -138,6 +138,8 @@ def load_existing_env_vars():
             "TAVILY_API_KEY": backend_env.get("TAVILY_API_KEY", ""),
             "FIRECRAWL_API_KEY": backend_env.get("FIRECRAWL_API_KEY", ""),
             "FIRECRAWL_URL": backend_env.get("FIRECRAWL_URL", ""),
+            "EXA_API_KEY": backend_env.get("EXA_API_KEY", ""),
+            "SEMANTIC_SCHOLAR_API_KEY": backend_env.get("SEMANTIC_SCHOLAR_API_KEY", ""),
         },
         "rapidapi": {
             "RAPID_API_KEY": backend_env.get("RAPID_API_KEY", ""),
@@ -686,9 +688,9 @@ class SetupWizard:
         )
         print_info("Create a snapshot with these exact settings:")
         print_info(
-            f"   - Name:\t\t{Colors.GREEN}kortix/suna:0.1.3.19{Colors.ENDC}")
+            f"   - Name:\t\t{Colors.GREEN}kortix/suna:0.1.3.21{Colors.ENDC}")
         print_info(
-            f"   - Snapshot name:\t{Colors.GREEN}kortix/suna:0.1.3.19{Colors.ENDC}")
+            f"   - Snapshot name:\t{Colors.GREEN}kortix/suna:0.1.3.21{Colors.ENDC}")
         print_info(
             f"   - Entrypoint:\t{Colors.GREEN}/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf{Colors.ENDC}"
         )
@@ -848,9 +850,10 @@ class SetupWizard:
             )
         else:
             print_info(
-                "Suna uses Tavily for search and Firecrawl for web scraping.")
+                "Suna uses Tavily for search, Firecrawl for web scraping, Exa for people/company search, and Semantic Scholar for academic papers.")
             print_info(
-                "Get a Tavily key at https://tavily.com and a Firecrawl key at https://firecrawl.dev"
+                "Get a Tavily key at https://tavily.com, a Firecrawl key at https://firecrawl.dev, "
+                "an Exa key at https://exa.ai, and a Semantic Scholar key at https://www.semanticscholar.org/product/api"
             )
             input("Press Enter to continue once you have your keys...")
 
@@ -865,6 +868,36 @@ class SetupWizard:
             validate_api_key,
             "Invalid API key.",
             default_value=self.env_vars["search"]["FIRECRAWL_API_KEY"],
+        )
+        
+        # Exa API key (optional for people search)
+        print_info(
+            "\nExa API enables advanced people search with LinkedIn/email enrichment using Websets."
+        )
+        print_info(
+            "This is optional but required for the People Search tool. Leave blank to skip."
+        )
+        self.env_vars["search"]["EXA_API_KEY"] = self._get_input(
+            "Enter your Exa API key (optional): ",
+            validate_api_key,
+            "Invalid API key.",
+            allow_empty=True,
+            default_value=self.env_vars["search"]["EXA_API_KEY"],
+        )
+        
+        # Semantic Scholar API key (optional for academic paper search)
+        print_info(
+            "\nSemantic Scholar API enables searching and analyzing academic papers and research."
+        )
+        print_info(
+            "This is optional but required for the Research Papers tool. Leave blank to skip."
+        )
+        self.env_vars["search"]["SEMANTIC_SCHOLAR_API_KEY"] = self._get_input(
+            "Enter your Semantic Scholar API key (optional): ",
+            validate_api_key,
+            "Invalid API key.",
+            allow_empty=True,
+            default_value=self.env_vars["search"]["SEMANTIC_SCHOLAR_API_KEY"],
         )
 
         # Handle Firecrawl URL configuration

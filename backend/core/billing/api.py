@@ -21,6 +21,7 @@ from .webhook_service import webhook_service
 from .subscription_service import subscription_service
 from .trial_service import trial_service
 from .payment_service import payment_service
+from .reconciliation_service import reconciliation_service
  
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -30,6 +31,7 @@ class CreateCheckoutSessionRequest(BaseModel):
     price_id: str
     success_url: str
     cancel_url: str
+    commitment_type: Optional[str] = None
 
 class CreatePortalSessionRequest(BaseModel):
     return_url: str
@@ -77,8 +79,6 @@ def calculate_token_cost(prompt_tokens: int, completion_tokens: int, model: str)
     except Exception as e:
         logger.error(f"[COST_CALC] Error calculating token cost for model '{model}': {e}")
         return Decimal('0.01')
-
-
 
 async def calculate_credit_breakdown(account_id: str, client) -> Dict:
     current_balance = await credit_service.get_balance(account_id)
@@ -434,6 +434,54 @@ async def get_subscription(
             }
         }
 
+@router.get("/subscription-cancellation-status")
+async def get_subscription_cancellation_status(
+    account_id: str = Depends(verify_and_get_user_id_from_jwt)
+) -> Dict:
+    try:
+        subscription_info = await subscription_service.get_subscription(account_id)
+        subscription_data = subscription_info.get('subscription')
+
+        if not subscription_data or not subscription_data.get('id'):
+            return {
+                'has_subscription': False,
+                'is_cancelled': False,
+                'cancel_at': None,
+                'cancel_at_period_end': False,
+                'current_period_end': None,
+                'status': None
+            }
+        
+        try:
+            stripe_subscription = stripe.Subscription.retrieve(subscription_data['id'])
+            is_cancelled = stripe_subscription.cancel_at_period_end or stripe_subscription.cancel_at is not None
+            
+            return {
+                'has_subscription': True,
+                'subscription_id': stripe_subscription.id,
+                'is_cancelled': is_cancelled,
+                'cancel_at': stripe_subscription.cancel_at,
+                'cancel_at_period_end': stripe_subscription.cancel_at_period_end,
+                'canceled_at': stripe_subscription.canceled_at,
+                'current_period_end': stripe_subscription.current_period_end,
+                'status': stripe_subscription.status,
+                'cancellation_details': stripe_subscription.cancellation_details if hasattr(stripe_subscription, 'cancellation_details') else None
+            }
+        except stripe.error.StripeError as e:
+            return {
+                'has_subscription': True,
+                'subscription_id': subscription_data.get('id'),
+                'is_cancelled': False,
+                'cancel_at': None,
+                'cancel_at_period_end': False,
+                'current_period_end': subscription_data.get('current_period_end'),
+                'status': subscription_data.get('status'),
+                'error': 'Could not retrieve cancellation status from Stripe'
+            }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     request: CreateCheckoutSessionRequest,
@@ -443,8 +491,9 @@ async def create_checkout_session(
         result = await subscription_service.create_checkout_session(
             account_id=account_id,
             price_id=request.price_id,
-                success_url=request.success_url,
-            cancel_url=request.cancel_url
+            success_url=request.success_url,
+            cancel_url=request.cancel_url,
+            commitment_type=request.commitment_type
         )
         return result
             
@@ -505,8 +554,12 @@ async def cancel_subscription(
         await Cache.invalidate(f"subscription_tier:{account_id}")
         return result
         
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Error canceling subscription: {e}", exc_info=True)
+        logger.error(f"Error canceling subscription: {str(e)}")
+        if "commitment period" in str(e).lower():
+            raise HTTPException(status_code=403, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/reactivate-subscription")
@@ -518,8 +571,11 @@ async def reactivate_subscription(
         await Cache.invalidate(f"subscription_tier:{account_id}")
         return result
         
+    except HTTPException as e:
+        # Re-raise HTTP exceptions as-is
+        raise e
     except Exception as e:
-        logger.error(f"Error reactivating subscription: {e}", exc_info=True)
+        logger.error(f"Error reactivating subscription: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/transactions")
@@ -934,4 +990,143 @@ async def create_trial_checkout(
         raise
     except Exception as e:
         logger.error(f"[TRIAL API ERROR] Unexpected error in trial checkout for account {account_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while processing your request") 
+        raise HTTPException(status_code=500, detail="An error occurred while processing your request")
+
+@router.get("/proration-preview")
+async def preview_proration(
+    new_price_id: str = Query(..., description="The price ID to change to"),
+    account_id: str = Depends(verify_and_get_user_id_from_jwt)
+) -> Dict:
+    try:
+        db = DBConnection()
+        client = await db.client
+        
+        subscription_result = await client.from_('credit_accounts').select(
+            'stripe_subscription_id'
+        ).eq('account_id', account_id).execute()
+        
+        if not subscription_result.data or not subscription_result.data[0].get('stripe_subscription_id'):
+            raise HTTPException(status_code=404, detail="No active subscription found")
+        
+        subscription_id = subscription_result.data[0]['stripe_subscription_id']
+        subscription = await stripe.Subscription.retrieve_async(subscription_id)
+        
+        current_item = subscription['items']['data'][0]
+        
+        proration = await stripe.Invoice.upcoming_async(
+            customer=subscription.customer,
+            subscription=subscription_id,
+            subscription_items=[{
+                'id': current_item.id,
+                'price': new_price_id,
+            }],
+            subscription_proration_behavior='always_invoice'
+        )
+        
+        current_price = current_item.price
+        new_price = await stripe.Price.retrieve_async(new_price_id)
+        
+        from billing.config import get_tier_by_price_id
+        
+        current_tier = get_tier_by_price_id(current_price.id)
+        new_tier = get_tier_by_price_id(new_price_id)
+        
+        proration_amount = Decimal(str(proration.amount_due)) / 100
+        
+        return {
+            'current_plan': {
+                'price_id': current_price.id,
+                'tier_name': current_tier.name if current_tier else 'unknown',
+                'monthly_amount': float(current_price.unit_amount / 100)
+            },
+            'new_plan': {
+                'price_id': new_price_id,
+                'tier_name': new_tier.name if new_tier else 'unknown',
+                'monthly_amount': float(new_price.unit_amount / 100)
+            },
+            'proration': {
+                'amount_due_now': float(proration_amount),
+                'credit_applied': float(abs(proration.starting_balance or 0) / 100),
+                'next_payment_date': datetime.fromtimestamp(proration.period_end, tz=timezone.utc).isoformat(),
+                'next_payment_amount': float(new_price.unit_amount / 100)
+            },
+            'is_upgrade': proration_amount > 0,
+            'description': f"You will be {'charged' if proration_amount > 0 else 'credited'} ${abs(proration_amount):.2f} for the remaining time in your billing period"
+        }
+    
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error in proration preview: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate proration: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error in proration preview: {e}")
+        raise HTTPException(status_code=500, detail="Failed to preview proration")
+
+@router.post("/reconcile")
+async def trigger_reconciliation(
+    admin_key: Optional[str] = Query(None, description="Admin API key"),
+    account_id: str = Depends(verify_and_get_user_id_from_jwt)
+) -> Dict:
+
+    if admin_key != config.get('ADMIN_API_KEY'):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        payment_results = await reconciliation_service.reconcile_failed_payments()
+        balance_results = await reconciliation_service.verify_balance_consistency()
+        duplicate_results = await reconciliation_service.detect_double_charges()
+        cleanup_results = await reconciliation_service.cleanup_expired_credits()
+        
+        return {
+            'success': True,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'results': {
+                'payment_reconciliation': payment_results,
+                'balance_verification': balance_results,
+                'duplicate_detection': duplicate_results,
+                'expired_credit_cleanup': cleanup_results
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Reconciliation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Reconciliation failed: {str(e)}")
+
+@router.get("/health-check")
+async def billing_health_check(
+    admin_key: Optional[str] = Query(None, description="Admin API key")
+) -> Dict:
+    """
+    Get billing system health status and detect issues.
+    """
+    is_admin = admin_key == config.get('ADMIN_API_KEY') if admin_key else False
+    
+    try:
+        db = DBConnection()
+        client = await db.client
+        
+        health_result = await client.from_('billing_health_check').select('*').execute()
+        
+        issues = []
+        for check in health_result.data or []:
+            if check['issue_count'] > 0:
+                issues.append({
+                    'type': check['check_type'],
+                    'count': check['issue_count'],
+                    'details': check['details'] if is_admin else None
+                })
+        
+        return {
+            'healthy': len(issues) == 0,
+            'issues_found': len(issues),
+            'issues': issues if is_admin else [{'type': i['type'], 'count': i['count']} for i in issues],
+            'message': 'All systems operational' if len(issues) == 0 else f'{len(issues)} issues detected',
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            'healthy': False,
+            'error': str(e) if is_admin else 'Health check failed',
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        } 
