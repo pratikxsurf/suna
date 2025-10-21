@@ -22,6 +22,7 @@ from .subscription_service import subscription_service
 from .trial_service import trial_service
 from .payment_service import payment_service
 from .reconciliation_service import reconciliation_service
+from .stripe_circuit_breaker import StripeAPIWrapper, stripe_circuit_breaker
  
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -132,6 +133,9 @@ async def check_status(
     account_id: str = Depends(verify_and_get_user_id_from_jwt)
 ) -> Dict:
     try:
+        from core.utils.ensure_suna import ensure_suna_installed
+        await ensure_suna_installed(account_id)
+        
         if config.ENV_MODE == EnvMode.LOCAL:
             return {
                 "can_run": True,
@@ -200,7 +204,7 @@ async def check_status(
         }
         
     except Exception as e:
-        logger.error(f"Error checking billing status: {e}", exc_info=True)
+        logger.error(f"Error checking billing status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/project-limits")
@@ -335,7 +339,7 @@ async def purchase_credits_checkout(
         amount=request.amount,
         success_url=request.success_url,
         cancel_url=request.cancel_url,
-        get_user_subscription_tier_func=None  # Will be imported in payment service
+        get_user_subscription_tier_func=subscription_service.get_user_subscription_tier
     )
     return result
 
@@ -402,7 +406,7 @@ async def get_subscription(
         }
         
     except Exception as e:
-        logger.error(f"Error getting subscription: {e}", exc_info=True)
+        logger.error(f"Error getting subscription: {str(e)}")
         no_tier = TIERS['none']
         tier_info = {
             'name': no_tier.name,
@@ -453,7 +457,7 @@ async def get_subscription_cancellation_status(
             }
         
         try:
-            stripe_subscription = stripe.Subscription.retrieve(subscription_data['id'])
+            stripe_subscription = await StripeAPIWrapper.retrieve_subscription(subscription_data['id'])
             is_cancelled = stripe_subscription.cancel_at_period_end or stripe_subscription.cancel_at is not None
             
             return {
@@ -498,7 +502,7 @@ async def create_checkout_session(
         return result
             
     except Exception as e:
-        logger.error(f"Error creating checkout session: {e}", exc_info=True)
+        logger.error(f"Error creating checkout session: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/create-portal-session")
@@ -513,7 +517,7 @@ async def create_portal_session(
         )
         return result
     except Exception as e:
-        logger.error(f"Error creating portal session: {e}", exc_info=True)
+        logger.error(f"Error creating portal session: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/sync-subscription")
@@ -534,7 +538,7 @@ async def sync_subscription(
         return result
         
     except Exception as e:
-        logger.error(f"Error syncing subscription: {e}", exc_info=True)
+        logger.error(f"Error syncing subscription: {str(e)}")
         return {
             'success': False,
             'message': f'Failed to sync subscription: {str(e)}'
@@ -635,7 +639,7 @@ async def get_my_transactions(
         }
         
     except Exception as e:
-        logger.error(f"Failed to get transactions for account {account_id}: {e}", exc_info=True)
+        logger.error(f"Failed to get transactions for account {account_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve transactions")
 
 @router.get("/transactions/summary")
@@ -693,7 +697,7 @@ async def get_transactions_summary(
         }
         
     except Exception as e:
-        logger.error(f"Failed to get transaction summary for account {account_id}: {e}", exc_info=True)
+        logger.error(f"Failed to get transaction summary for account {account_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve transaction summary")
 
 @router.get("/credit-breakdown")
@@ -783,7 +787,7 @@ async def get_usage_history(
         }
         
     except Exception as e:
-        logger.error(f"Error getting usage history: {e}", exc_info=True)
+        logger.error(f"Error getting usage history: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 
 
 
@@ -870,7 +874,7 @@ async def get_available_models(
         }
         
     except Exception as e:
-        logger.error(f"Error getting available models: {e}", exc_info=True)
+        logger.error(f"Error getting available models: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/subscription-commitment/{subscription_id}")
@@ -900,11 +904,14 @@ async def get_trial_status(
     account_id: str = Depends(verify_and_get_user_id_from_jwt)
 ) -> Dict:
     try:
+        from core.utils.ensure_suna import ensure_suna_installed
+        await ensure_suna_installed(account_id)
+        
         result = await trial_service.get_trial_status(account_id)
         return result
         
     except Exception as e:
-        logger.error(f"Error checking trial status: {e}", exc_info=True)
+        logger.error(f"Error checking trial status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/trial/cancel")
@@ -918,7 +925,7 @@ async def cancel_trial(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error cancelling trial for account {account_id}: {e}", exc_info=True)
+        logger.error(f"Error cancelling trial for account {account_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/trial/start")
@@ -956,7 +963,7 @@ async def start_trial(
             logger.info(f"[TRIAL API] Trial start failed for account {account_id}: {e.detail}")
         raise
     except Exception as e:
-        logger.error(f"[TRIAL API ERROR] Unexpected error creating trial for account {account_id}: {e}", exc_info=True)
+        logger.error(f"[TRIAL API ERROR] Unexpected error creating trial for account {account_id}: {str(e)}")
         # Don't expose internal errors to the client
         raise HTTPException(status_code=500, detail="An error occurred while processing your request")
 
@@ -989,7 +996,7 @@ async def create_trial_checkout(
             logger.info(f"[TRIAL API] Trial checkout failed for account {account_id}: {e.detail}")
         raise
     except Exception as e:
-        logger.error(f"[TRIAL API ERROR] Unexpected error in trial checkout for account {account_id}: {e}", exc_info=True)
+        logger.error(f"[TRIAL API ERROR] Unexpected error in trial checkout for account {account_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="An error occurred while processing your request")
 
 @router.get("/proration-preview")
@@ -1009,11 +1016,11 @@ async def preview_proration(
             raise HTTPException(status_code=404, detail="No active subscription found")
         
         subscription_id = subscription_result.data[0]['stripe_subscription_id']
-        subscription = await stripe.Subscription.retrieve_async(subscription_id)
+        subscription = await StripeAPIWrapper.retrieve_subscription(subscription_id)
         
         current_item = subscription['items']['data'][0]
         
-        proration = await stripe.Invoice.upcoming_async(
+        proration = await StripeAPIWrapper.upcoming_invoice(
             customer=subscription.customer,
             subscription=subscription_id,
             subscription_items=[{
@@ -1024,7 +1031,7 @@ async def preview_proration(
         )
         
         current_price = current_item.price
-        new_price = await stripe.Price.retrieve_async(new_price_id)
+        new_price = await StripeAPIWrapper.retrieve_price(new_price_id)
         
         from billing.config import get_tier_by_price_id
         
@@ -1091,42 +1098,25 @@ async def trigger_reconciliation(
         logger.error(f"Reconciliation error: {e}")
         raise HTTPException(status_code=500, detail=f"Reconciliation failed: {str(e)}")
 
-@router.get("/health-check")
-async def billing_health_check(
+@router.get("/circuit-breaker-status")
+async def get_circuit_breaker_status(
     admin_key: Optional[str] = Query(None, description="Admin API key")
 ) -> Dict:
-    """
-    Get billing system health status and detect issues.
-    """
-    is_admin = admin_key == config.get('ADMIN_API_KEY') if admin_key else False
+    if admin_key != config.get('ADMIN_API_KEY'):
+        raise HTTPException(status_code=403, detail="Unauthorized - admin key required")
     
     try:
+        status = await stripe_circuit_breaker.get_status()
+        
         db = DBConnection()
         client = await db.client
-        
-        health_result = await client.from_('billing_health_check').select('*').execute()
-        
-        issues = []
-        for check in health_result.data or []:
-            if check['issue_count'] > 0:
-                issues.append({
-                    'type': check['check_type'],
-                    'count': check['issue_count'],
-                    'details': check['details'] if is_admin else None
-                })
+        all_circuits = await client.from_('circuit_breaker_state').select('*').execute()
         
         return {
-            'healthy': len(issues) == 0,
-            'issues_found': len(issues),
-            'issues': issues if is_admin else [{'type': i['type'], 'count': i['count']} for i in issues],
-            'message': 'All systems operational' if len(issues) == 0 else f'{len(issues)} issues detected',
+            'primary_circuit': status,
+            'all_circuits': all_circuits.data if all_circuits.data else [],
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
-    
     except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return {
-            'healthy': False,
-            'error': str(e) if is_admin else 'Health check failed',
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        } 
+        logger.error(f"Error getting circuit breaker status: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) 

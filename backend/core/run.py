@@ -45,9 +45,7 @@ from core.tools.paper_search_tool import PaperSearchTool
 from core.ai_models.manager import model_manager
 from core.tools.vapi_voice_tool import VapiVoiceTool
 
-
 load_dotenv()
-
 
 @dataclass
 class AgentConfig:
@@ -163,7 +161,6 @@ class ToolManager:
             if enabled_methods:
                 logger.debug(f"✅ Registered vapi_voice_tool with methods: {enabled_methods}")
             
-    
     def _register_agent_builder_tools(self, agent_id: str, disabled_tools: List[str]):
         """Register agent builder tools with proper initialization."""
         from core.tools.agent_builder_tools.agent_config_tool import AgentConfigTool
@@ -640,12 +637,15 @@ class AgentRunner:
         continue_execution = True
 
         latest_user_message = await self.client.table('messages').select('*').eq('thread_id', self.config.thread_id).eq('type', 'user').order('created_at', desc=True).limit(1).execute()
+        latest_user_message_content = None
         if latest_user_message.data and len(latest_user_message.data) > 0:
             data = latest_user_message.data[0]['content']
             if isinstance(data, str):
                 data = json.loads(data)
             if self.config.trace:
                 self.config.trace.update(input=data['content'])
+            # Extract content for fast path optimization
+            latest_user_message_content = data.get('content') if isinstance(data, dict) else str(data)
 
         while continue_execution and iteration_count < self.config.max_iterations:
             iteration_count += 1
@@ -684,6 +684,7 @@ class AgentRunner:
                     tool_choice="auto",
                     max_xml_tool_calls=1,
                     temporary_message=temporary_message,
+                    latest_user_message_content=latest_user_message_content,
                     processor_config=ProcessorConfig(
                         xml_tool_calling=True,
                         native_tool_calling=False,

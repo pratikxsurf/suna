@@ -7,20 +7,20 @@ from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
 from fastapi import APIRouter, HTTPException, Depends, Request, Body, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
-
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt, get_user_id_from_stream_auth, verify_and_authorize_thread_access
 from core.utils.logger import logger, structlog
-# Billing checks now handled by billing_integration.check_model_and_billing_access
 from core.billing.billing_integration import billing_integration
 from core.utils.config import config, EnvMode
 from core.services import redis
 from core.sandbox.sandbox import create_sandbox, delete_sandbox
 from core.utils.sandbox_utils import generate_unique_filename, get_uploads_directory
 from run_agent_background import run_agent_background
+
 from core.ai_models import model_manager
 
 from .api_models import AgentStartRequest, AgentVersionResponse, AgentResponse, ThreadAgentResponse, InitiateAgentResponse
 from . import core_utils as utils
+
 from .core_utils import (
     stop_agent_run_with_helpers as stop_agent_run,
     _get_version_service, generate_and_update_project_name,
@@ -28,7 +28,6 @@ from .core_utils import (
 )
 
 router = APIRouter(tags=["agent-runs"])
-
 
 async def _get_agent_run_with_access_check(client, agent_run_id: str, user_id: str):
     """
@@ -71,11 +70,15 @@ async def start_agent(
 
     # Log the model name after alias resolution using new model manager
     from core.ai_models import model_manager
-    resolved_model = model_manager.resolve_model_id(model_name)
-    logger.debug(f"Resolved model name: {resolved_model}")
-
-    # Update model_name to use the resolved version
-    model_name = resolved_model
+    
+    # Handle None model_name - resolve only if provided
+    if model_name:
+        resolved_model = model_manager.resolve_model_id(model_name)
+        logger.debug(f"Resolved model name: {resolved_model}")
+        # Update model_name to use the resolved version
+        model_name = resolved_model
+    else:
+        logger.debug(f"No model_name specified, will use default for user")
 
     logger.debug(f"Starting new agent for thread: {thread_id} with config: model={model_name} (Instance: {utils.instance_id})")
     client = await utils.db.client
@@ -168,10 +171,13 @@ async def start_agent(
     if not model_name and agent_config and agent_config.get('model'):
         effective_model = agent_config['model']
         logger.debug(f"No model specified by user, using agent's configured model: {effective_model}")
-    elif model_name:
-        logger.debug(f"Using user-selected model: {effective_model}")
+    elif not model_name:
+        # No model from user or agent, use default for user's tier
+        from core.ai_models import model_manager
+        effective_model = await model_manager.get_default_model_for_user(client, account_id)
+        logger.debug(f"Using default model for user: {effective_model}")
     else:
-        logger.debug(f"Using default model: {effective_model}")
+        logger.debug(f"Using user-selected model: {effective_model}")
     
     agent_run = await client.table('agent_runs').insert({
         "thread_id": thread_id,
@@ -201,7 +207,7 @@ async def start_agent(
     run_agent_background.send(
         agent_run_id=agent_run_id, thread_id=thread_id, instance_id=utils.instance_id,
         project_id=project_id,
-        model_name=model_name,  # Already resolved above
+        model_name=effective_model,  # Use the resolved effective_model, not the original model_name
         agent_config=agent_config,  # Pass agent configuration
         request_id=request_id,
     )
@@ -593,7 +599,6 @@ async def stream_agent_run(
     })
 
 
-
 @router.post("/agent/initiate", response_model=InitiateAgentResponse, summary="Initiate Agent Session", operation_id="initiate_agent_session")
 async def initiate_agent_with_files(
     prompt: str = Form(...),
@@ -645,15 +650,22 @@ async def initiate_agent_with_files(
         agent_data = await loader.load_agent(agent_id, user_id, load_config=True)
         logger.debug(f"Using agent {agent_data.name} ({agent_id}) version {agent_data.version_name}")
     else:
-        # Load default agent
+        # Load default agent - ensure Suna is installed first
         logger.debug(f"[AGENT INITIATE] Loading default agent")
-        default_agent = await client.table('agents').select('agent_id').eq('account_id', account_id).eq('is_default', True).maybe_single().execute()
         
-        if default_agent.data:
+        # Ensure Suna is installed for this account
+        from core.utils.ensure_suna import ensure_suna_installed
+        await ensure_suna_installed(account_id)
+        
+        # Try to find the default agent (Suna)
+        default_agent = await client.table('agents').select('agent_id').eq('account_id', account_id).eq('metadata->>is_suna_default', 'true').maybe_single().execute()
+        
+        if default_agent and default_agent.data:
             agent_data = await loader.load_agent(default_agent.data['agent_id'], user_id, load_config=True)
             logger.debug(f"Using default agent: {agent_data.name} ({agent_data.agent_id}) version {agent_data.version_name}")
         else:
             logger.warning(f"[AGENT INITIATE] No default agent found for account {account_id}")
+            raise HTTPException(status_code=404, detail="No default agent available. Please contact support.")
     
     # Convert to dict for backward compatibility with rest of function
     agent_config = agent_data.to_dict() if agent_data else None
